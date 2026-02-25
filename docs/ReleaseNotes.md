@@ -6,7 +6,13 @@ Current package versions:
 | ------------ | ----------------- | ----- |
 | [![StackExchange.Redis](https://img.shields.io/nuget/v/StackExchange.Redis.svg)](https://www.nuget.org/packages/StackExchange.Redis/) | [![StackExchange.Redis](https://img.shields.io/nuget/vpre/StackExchange.Redis.svg)](https://www.nuget.org/packages/StackExchange.Redis/) | [![StackExchange.Redis MyGet](https://img.shields.io/myget/stackoverflow/vpre/StackExchange.Redis.svg)](https://www.myget.org/feed/stackoverflow/package/nuget/StackExchange.Redis) |
 
-## 2.11.unreleased
+## 2.11.8
+
+* Handle `-MOVED` error pointing to same endpoint. ([#3003 by @barshaul](https://github.com/StackExchange/StackExchange.Redis/pull/3003))
+* fix time conversion error in `HOTKEYS` ([#3017 by @mgravell](https://github.com/StackExchange/StackExchange.Redis/pull/3017))
+
+- Add support for `VRANGE` ([#3011 by mgravell](https://github.com/StackExchange/StackExchange.Redis/pull/3011))
+- Add defensive code in azure-maintenance-events handling ([#3013 by mgravell](https://github.com/StackExchange/StackExchange.Redis/pull/3013))
 
 ## 2.11.3
 
