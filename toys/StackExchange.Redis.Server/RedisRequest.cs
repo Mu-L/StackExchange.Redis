@@ -41,6 +41,20 @@ namespace StackExchange.Redis.Server
         public int GetInt32(int index)
             => (int)_inner[index].AsRedisValue();
 
+        public bool TryGetInt64(int index, out long value)
+            => _inner[index].TryGetInt64(out value);
+        public bool TryGetInt32(int index, out int value)
+        {
+            if (_inner[index].TryGetInt64(out var tmp))
+            {
+                value = (int)tmp;
+                if (value == tmp) return true;
+            }
+
+            value = 0;
+            return false;
+        }
+
         public long GetInt64(int index) => (long)_inner[index].AsRedisValue();
 
         public RedisKey GetKey(int index) => _inner[index].AsRedisKey();

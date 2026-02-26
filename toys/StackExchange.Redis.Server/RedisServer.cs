@@ -14,6 +14,7 @@ namespace StackExchange.Redis.Server
 
         protected RedisServer(int databases = 16, TextWriter output = null) : base(output)
         {
+            RedisVersion = s_DefaultServerVersion;
             if (databases < 1) throw new ArgumentOutOfRangeException(nameof(databases));
             Databases = databases;
             var config = ServerConfiguration;
@@ -41,6 +42,107 @@ namespace StackExchange.Redis.Server
             }
         }
         public int Databases { get; }
+
+        public string Password { get; set; } = "";
+
+        public override TypedRedisValue Execute(RedisClient client, RedisRequest request)
+        {
+            var pw = Password;
+            if (pw.Length != 0 & !client.IsAuthenticated)
+            {
+                if (!Literals.IsAuthCommand(in request)) return TypedRedisValue.Error("NOAUTH Authentication required.");
+            }
+            return base.Execute(client, request);
+        }
+
+        internal class Literals
+        {
+            public static readonly CommandBytes
+                AUTH = new("AUTH"u8),
+                HELLO = new("HELLO"u8),
+                SETNAME = new("SETNAME"u8);
+
+            public static bool IsAuthCommand(in RedisRequest request) =>
+                request.Count != 0 && request.TryGetCommandBytes(0, out var command)
+                                   && (command.Equals(AUTH) || command.Equals(HELLO));
+        }
+
+        [RedisCommand(2)]
+        protected virtual TypedRedisValue Auth(RedisClient client, RedisRequest request)
+        {
+            if (request.GetString(1) == Password)
+            {
+                client.IsAuthenticated = true;
+                return TypedRedisValue.OK;
+            }
+            return TypedRedisValue.Error("ERR invalid password");
+        }
+
+        [RedisCommand(-1)]
+        protected virtual TypedRedisValue Hello(RedisClient client, RedisRequest request)
+        {
+            var protocol = client.Protocol;
+            bool isAuthed = client.IsAuthenticated;
+            string name = client.Name;
+            if (request.Count >= 2)
+            {
+                if (!request.TryGetInt32(1, out var protover)) return TypedRedisValue.Error("ERR Protocol version is not an integer or out of range");
+                switch (protover)
+                {
+                    case 2:
+                    case 3:
+                        protocol = RedisProtocol.Resp2;
+                        break;
+                    /* case 3: // this client does not currently support RESP3
+                        protocol = RedisProtocol.Resp3;
+                        break; */
+                    default:
+                        return TypedRedisValue.Error("NOPROTO unsupported protocol version");
+                }
+
+                for (int i = 2; i < request.Count && request.TryGetCommandBytes(i, out var key); i++)
+                {
+                    int remaining = request.Count - (i + 2);
+                    TypedRedisValue ArgFail() => TypedRedisValue.Error($"ERR Syntax error in HELLO option '{key.ToString().ToLower()}'\"");
+                    if (key.Equals(Literals.AUTH))
+                    {
+                        if (remaining < 2) return ArgFail();
+                        // ignore username for now
+                        var pw = request.GetString(i + 2);
+                        if (pw != Password) return TypedRedisValue.Error("WRONGPASS invalid username-password pair or user is disabled.");
+                        isAuthed = true;
+                        i += 2;
+                    }
+                    else if (key.Equals(Literals.SETNAME))
+                    {
+                        if (remaining < 1) return ArgFail();
+                        name = request.GetString(++i);
+                    }
+                }
+            }
+
+            // all good, update client
+            client.Protocol = protocol;
+            client.IsAuthenticated = isAuthed;
+            client.Name = name;
+
+            var reply = TypedRedisValue.Rent(14, out var span);
+            span[0] = TypedRedisValue.BulkString("server");
+            span[1] = TypedRedisValue.BulkString("redis");
+            span[2] = TypedRedisValue.BulkString("version");
+            span[3] = TypedRedisValue.BulkString(VersionString);
+            span[4] = TypedRedisValue.BulkString("proto");
+            span[5] = TypedRedisValue.Integer(client.ProtocolVersion);
+            span[6] = TypedRedisValue.BulkString("id");
+            span[7] = TypedRedisValue.Integer(client.Id);
+            span[8] = TypedRedisValue.BulkString("mode");
+            span[9] = TypedRedisValue.BulkString(ModeString);
+            span[10] = TypedRedisValue.BulkString("role");
+            span[11] = TypedRedisValue.BulkString("master");
+            span[12] = TypedRedisValue.BulkString("modules");
+            span[13] = TypedRedisValue.EmptyArray;
+            return reply;
+        }
 
         [RedisCommand(-3)]
         protected virtual TypedRedisValue Sadd(RedisClient client, RedisRequest request)
@@ -371,10 +473,36 @@ namespace StackExchange.Redis.Server
 
         private static readonly Version s_DefaultServerVersion = new(1, 0, 0);
 
-        public Version RedisVersion { get; set; } = s_DefaultServerVersion;
+        private string _versionString;
+        private string VersionString => _versionString;
+        private static string FormatVersion(Version v)
+        {
+            var sb = new StringBuilder().Append(v.Major).Append('.').Append(v.Minor);
+            if (v.Revision >= 0) sb.Append('.').Append(v.Revision);
+            if (v.Build >= 0) sb.Append('.').Append(v.Build);
+            return sb.ToString();
+        }
+
+        public Version RedisVersion
+        {
+            get;
+            set
+            {
+                if (field == value) return;
+                field = value;
+                _versionString = FormatVersion(value);
+            }
+        }
 
         public DateTime StartTime { get; set; } = DateTime.UtcNow;
         public ServerType ServerType { get; set; } = ServerType.Standalone;
+
+        private string ModeString => ServerType switch
+        {
+            ServerType.Cluster => "cluster",
+            ServerType.Sentinel => "sentinel",
+            _ => "standalone",
+        };
         protected virtual void Info(StringBuilder sb, string section)
         {
             StringBuilder AddHeader()
@@ -387,15 +515,8 @@ namespace StackExchange.Redis.Server
             {
                 case "Server":
                     var v = RedisVersion;
-                    AddHeader().Append("redis_version:").Append(v.Major).Append('.').Append(v.Minor);
-                    if (v.Revision >= 0) sb.Append('.').Append(v.Revision);
-                    if (v.Build >= 0) sb.Append('.').Append(v.Build);
-                    sb.AppendLine();
-                    sb.Append("redis_mode:").Append(ServerType switch {
-                        ServerType.Cluster => "cluster",
-                        ServerType.Sentinel => "sentinel",
-                        _ => "standalone",
-                    }).AppendLine()
+                    AddHeader().Append("redis_version:").AppendLine(VersionString)
+                        .Append("redis_mode:").Append(ModeString).AppendLine()
                         .Append("os:").Append(Environment.OSVersion).AppendLine()
                         .Append("arch_bits:x").Append(IntPtr.Size * 8).AppendLine();
                     using (var process = Process.GetCurrentProcess())

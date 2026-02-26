@@ -411,7 +411,7 @@ namespace StackExchange.Redis.Server
             _totalCommandsProcesed = _totalErrorCount = _totalClientCount = 0;
         }
 
-        public TypedRedisValue Execute(RedisClient client, RedisRequest request)
+        public virtual TypedRedisValue Execute(RedisClient client, RedisRequest request)
         {
             if (request.Count == 0) return default; // not a request
 
