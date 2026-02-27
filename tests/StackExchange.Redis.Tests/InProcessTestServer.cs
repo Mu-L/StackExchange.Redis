@@ -3,6 +3,7 @@ using System.IO;
 using System.IO.Pipelines;
 using System.Net;
 using System.Net.Sockets;
+using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using Pipelines.Sockets.Unofficial;
@@ -14,15 +15,77 @@ namespace StackExchange.Redis.Tests;
 
 public class InProcessTestServer : MemoryCacheRedisServer
 {
-    public Tunnel Tunnel { get; }
-
     private readonly ITestOutputHelper? _log;
     public InProcessTestServer(ITestOutputHelper? log = null)
     {
+        RedisVersion = RedisFeatures.v6_0_0; // for client to expect RESP3
         _log = log;
         // ReSharper disable once VirtualMemberCallInConstructor
         _log?.WriteLine($"Creating in-process server: {ToString()}");
         Tunnel = new InProcTunnel(this);
+    }
+
+    public Task<ConnectionMultiplexer> ConnectAsync(bool withPubSub = false, TextWriter? log = null)
+        => ConnectionMultiplexer.ConnectAsync(GetClientConfig(withPubSub), log);
+
+    public ConfigurationOptions GetClientConfig(bool withPubSub = false)
+    {
+        var commands = GetCommands();
+        if (!withPubSub)
+        {
+            commands.Remove(nameof(RedisCommand.SUBSCRIBE));
+            commands.Remove(nameof(RedisCommand.PSUBSCRIBE));
+            commands.Remove(nameof(RedisCommand.SSUBSCRIBE));
+            commands.Remove(nameof(RedisCommand.UNSUBSCRIBE));
+            commands.Remove(nameof(RedisCommand.PUNSUBSCRIBE));
+            commands.Remove(nameof(RedisCommand.SUNSUBSCRIBE));
+            commands.Remove(nameof(RedisCommand.PUBLISH));
+            commands.Remove(nameof(RedisCommand.SPUBLISH));
+        }
+        // transactions don't work yet
+        commands.Remove(nameof(RedisCommand.MULTI));
+        commands.Remove(nameof(RedisCommand.EXEC));
+        commands.Remove(nameof(RedisCommand.DISCARD));
+        commands.Remove(nameof(RedisCommand.WATCH));
+        commands.Remove(nameof(RedisCommand.UNWATCH));
+
+        var config = new ConfigurationOptions
+        {
+            CommandMap = CommandMap.Create(commands),
+            ConfigurationChannel = "",
+            TieBreaker = "",
+            DefaultVersion = RedisVersion,
+            ConnectTimeout = 10000,
+            SyncTimeout = 5000,
+            AsyncTimeout = 5000,
+            AllowAdmin = true,
+            Tunnel = Tunnel,
+        };
+        foreach (var endpoint in GetEndPoints())
+        {
+            config.EndPoints.Add(endpoint);
+        }
+        return config;
+    }
+
+    public Tunnel Tunnel { get; }
+
+    public override void Log(string message)
+    {
+        _log?.WriteLine(message);
+        base.Log(message);
+    }
+
+    protected override void OnMoved(RedisClient client, int hashSlot, Node node)
+    {
+        _log?.WriteLine($"Client {client.Id} being redirected: {hashSlot} to {node}");
+        base.OnMoved(client, hashSlot, node);
+    }
+
+    public override TypedRedisValue OnUnknownCommand(in RedisClient client, in RedisRequest request, ReadOnlySpan<byte> command)
+    {
+        _log?.WriteLine($"[{client.Id}] unknown command: {Encoding.ASCII.GetString(command)}");
+        return base.OnUnknownCommand(in client, in request, command);
     }
 
     private sealed class InProcTunnel(
@@ -33,8 +96,12 @@ public class InProcessTestServer : MemoryCacheRedisServer
             EndPoint endpoint,
             CancellationToken cancellationToken)
         {
-            // server._log?.WriteLine($"Disabling client creation, requested endpoint: {Format.ToString(endpoint)}");
-            return default;
+            if (server.TryGetNode(endpoint, out _))
+            {
+                // server._log?.WriteLine($"Disabling client creation, requested endpoint: {Format.ToString(endpoint)}");
+                return default;
+            }
+            return base.GetSocketConnectEndpointAsync(endpoint, cancellationToken);
         }
 
         public override ValueTask<Stream?> BeforeAuthenticateAsync(
@@ -43,13 +110,18 @@ public class InProcessTestServer : MemoryCacheRedisServer
             Socket? socket,
             CancellationToken cancellationToken)
         {
-            server._log?.WriteLine($"Client intercepted, requested endpoint: {Format.ToString(endpoint)} for {connectionType} usage");
-            var clientToServer = new Pipe(pipeOptions ?? PipeOptions.Default);
-            var serverToClient = new Pipe(pipeOptions ?? PipeOptions.Default);
-            var serverSide = new Duplex(clientToServer.Reader, serverToClient.Writer);
-            _ = Task.Run(async () => await server.RunClientAsync(serverSide), cancellationToken);
-            var clientSide = StreamConnection.GetDuplex(serverToClient.Reader, clientToServer.Writer);
-            return new(clientSide);
+            if (server.TryGetNode(endpoint, out var node))
+            {
+                server._log?.WriteLine(
+                    $"Client intercepted, endpoint {Format.ToString(endpoint)} ({connectionType}) mapped to {server.ServerType} node {node}");
+                var clientToServer = new Pipe(pipeOptions ?? PipeOptions.Default);
+                var serverToClient = new Pipe(pipeOptions ?? PipeOptions.Default);
+                var serverSide = new Duplex(clientToServer.Reader, serverToClient.Writer);
+                _ = Task.Run(async () => await server.RunClientAsync(serverSide, node: node), cancellationToken);
+                var clientSide = StreamConnection.GetDuplex(serverToClient.Reader, clientToServer.Writer);
+                return new(clientSide);
+            }
+            return base.BeforeAuthenticateAsync(endpoint, connectionType, socket, cancellationToken);
         }
 
         private sealed class Duplex(PipeReader input, PipeWriter output) : IDuplexPipe
@@ -65,6 +137,7 @@ public class InProcessTestServer : MemoryCacheRedisServer
             }
         }
     }
+
     /*
 
     private readonly RespServer _server;

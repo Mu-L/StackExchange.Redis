@@ -925,6 +925,30 @@ namespace StackExchange.Redis
             output.Advance(offset);
         }
 
+        internal static void WriteMultiBulkHeader(PipeWriter output, long count, ResultType type)
+        {
+            // *{count}\r\n         = 3 + MaxInt32TextLen
+            var span = output.GetSpan(3 + Format.MaxInt32TextLen);
+            span[0] = type switch
+            {
+                ResultType.Push => (byte)'>',
+                ResultType.Attribute => (byte)'|',
+                ResultType.Map => (byte)'%',
+                ResultType.Set => (byte)'~',
+                 _ => (byte)'*',
+            };
+            if ((type is ResultType.Map or ResultType.Attribute) & count > 0)
+            {
+                if ((count & 1) != 0) Throw(type, count);
+                count >>= 1;
+                static void Throw(ResultType type, long count) => throw new ArgumentOutOfRangeException(
+                    paramName: nameof(count),
+                    message: $"{type} data must be in pairs; got {count}");
+            }
+            int offset = WriteRaw(span, count, offset: 1);
+            output.Advance(offset);
+        }
+
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         internal static int WriteCrlf(Span<byte> span, int offset)
         {
