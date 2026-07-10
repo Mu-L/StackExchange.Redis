@@ -5550,6 +5550,11 @@ namespace StackExchange.Redis
                     throw ExceptionFactory.TooManyArgs(command, args.Count);
                 }
 
+                // a redis command token never contains space, so a command like
+                // "ACL SETUSER x" is always a caller mistake (it gets sent as one unknown token
+                // and the server replies with an opaque error); fail fast with actionable guidance
+                if (command.IndexOf(' ') >= 0) throw ExceptionFactory.CommandHasWhitespace(command);
+
                 map ??= CommandMap.Default;
                 _unknownCommand = "";
                 if (Command is RedisCommand.UNKNOWN)
